@@ -16,7 +16,7 @@ import inspect
 import json
 from pathlib import Path
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests, ToolApproved, ToolDenied
 from pydantic_ai.exceptions import ModelHTTPError
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -38,11 +38,17 @@ INSTRUCTIONS = """\
 """
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
-agent = Agent(instructions=INSTRUCTIONS)
+agent = Agent(instructions=INSTRUCTIONS, output_type=[str, DeferredToolRequests])
 agent.tool_plain(tools.search_glossary)
 agent.tool_plain(tools.get_lecture_summary)
 
 # TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
+agent.tool_plain(tools.make_quiz)
+
+# ログ保存するやつ（第３回宿題）
+#agent.tool_plain(tools.save_learning_log, requires_approval=True)
+agent.tool(tools.save_learning_log, requires_approval=True)
+
 
 # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
 MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
@@ -73,7 +79,11 @@ def load_mcp_servers(config_path: Path = MCP_CONFIG) -> list[MCPToolset]:
 
 def build_mcp_agent(config_path: Path = MCP_CONFIG) -> Agent:
     """第5回: 関数を直接登録する代わりに、MCP サーバーが公開するツールを使うエージェント。INSTRUCTIONS は同じ。"""
-    return Agent(instructions=INSTRUCTIONS, toolsets=load_mcp_servers(config_path))
+    return Agent(
+        instructions=INSTRUCTIONS,
+        output_type=[str, DeferredToolRequests],
+        toolsets=load_mcp_servers(config_path),
+    )
 
 
 def build_model() -> GoogleModel:
@@ -122,7 +132,9 @@ def main() -> None:
         print_tools(target)
         return
     if not args.question:
-        parser.error("質問を指定してください")
+        #parser.error("質問を指定してください")
+        chat()
+        return
 
     print(f"[model] {MODEL}")
     if args.mcp:
@@ -135,6 +147,136 @@ def main() -> None:
     print(result.output)
     if args.trace:
         print_trace(result)
+
+# ログ保存の確認をするための対話モード
+def chat() -> None:
+    print("=== 学習支援エージェントと対話を開始します ('exit' または 'quit' で終了) ===")
+    print("確認問題は '/quiz 2' のように指定してください。")
+
+    message_history = []  # これまでの会話の履歴（セッション）を保持するリスト
+    quiz = None           # 現在のクイズデータを一時保持
+
+    while True:
+        try:
+            question = input("\n[質問] ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n終了します。")
+            break
+
+        # 終了コマンドの判定
+        if question.lower() in {"exit", "quit"}:
+            print("お疲れ様でした！")
+            break
+        if not question:
+            continue
+
+        # クイズを作る専用コマンド '/quiz N' の処理
+        if question.startswith("/quiz"):
+            try:
+                lecture = int(question.split(maxsplit=1)[1])
+                quiz_data = json.loads(tools.make_quiz(lecture))
+                
+                # エラー処理
+                if quiz_data["answer"] in {"", "Error"}:
+                    print(quiz_data["question"])
+                    continue
+                
+                # 正常処理
+                quiz = quiz_data
+                print(f"\n第{lecture}回 確認問題")
+                print(quiz_data["question"])
+                print("回答を入力してください。")
+                continue
+
+            except (IndexError, ValueError, json.JSONDecodeError):
+                print("使い方: /quiz 2  （第2回の保存確認問題を出題）")
+                continue
+
+        # クイズが出題された状態でユーザーが「答え」を入力したときの処理
+        if quiz is not None:
+            expected = quiz["answer"]
+
+            # 表記揺れ（全角半角やスペース）を防ぐために文字列を正規化して比較
+            normalized_answer = question.casefold().replace(" ", "").replace(" ", "")
+            normalized_expected = expected.casefold().replace(" ", "").replace(" ", "")
+            is_correct = bool(normalized_expected) and normalized_answer == normalized_expected
+            
+            print("正解です！" if is_correct else "残念、不正解です。")
+            print(f"正解: {expected}")
+
+            # 学習ログへの保存確認
+            save = input("この問題と回答を学習ログに保存しますか？ [y/N] ").strip().lower()
+            if save in {"y", "yes", "はい"}:
+                lecture = f"第{quiz['lecture']}回"
+                quiz_question = quiz["question"]
+                answer_text = f"ユーザー回答: {question} / 正解: {expected}"
+                
+                # 保存を指示するプロンプト
+                prompt = (
+                    f"第{quiz['lecture']}回の問題『{quiz_question}』と回答『{answer_text}』を"
+                    "save_learning_logで保存してください。"
+                )
+                try:
+                    # 会話を引き継いで、エージェントを実行
+                    result = agent.run_sync(
+                        prompt,
+                        message_history=message_history,
+                        model=build_model(),
+                    )
+                    message_history = result.all_messages() # 履歴を更新
+
+                    # requires_approval=True により、承認待ちになった呼び出しだけを再開する。
+                    if isinstance(result.output, DeferredToolRequests):
+                        save_calls = [
+                            call for call in result.output.approvals
+                            if call.tool_name == "save_learning_log"
+                        ]
+                        if save_calls:
+                            approvals = {
+                                call.tool_call_id: ToolApproved()
+                                for call in save_calls
+                            }
+                            result = agent.run_sync(
+                                message_history=message_history,
+                                deferred_tool_results=result.output.build_results(approvals=approvals),
+                                model=build_model(),
+                            )
+                            message_history = result.all_messages()
+
+                            saved = any(
+                                isinstance(part, ToolReturnPart)
+                                and part.tool_name == "save_learning_log"
+                                for message in result.all_messages()
+                                for part in message.parts
+                            )
+                            print("学習ログを保存しました。" if saved else "学習ログの保存処理が完了しませんでした。")
+                        else:
+                            print("save_learning_logの承認待ち呼び出しが見つかりませんでした。")
+                    else:
+                        print("学習ログ保存ツールが呼び出されませんでした。")
+
+                    print(f"\n{result.output}")
+                except Exception as e:
+                    print(f"保存に失敗しました: {e}")
+            else:
+                print("学習ログへの保存をキャンセルしました。")
+
+            quiz = None  # クイズの状態をリセット
+            continue
+
+        # 通常のフリー会話・質問の処理
+        try:
+            result = agent.run_sync(
+                question,
+                message_history=message_history,
+                model=build_model(),
+            )
+        except Exception as e:
+            print(f"エラーが発生しました: {e}")
+            continue
+
+        print(f"\n学習支援エージェント:\n{result.output}")
+        message_history = result.all_messages()  # 会話履歴を更新して次のループへ
 
 
 if __name__ == "__main__":

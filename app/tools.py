@@ -5,6 +5,7 @@
 """
 
 import json
+import random
 from functools import cache
 from pathlib import Path
 
@@ -77,3 +78,88 @@ def get_lecture_summary(lecture: int) -> str:
         available = sorted(p.stem for p in (DATA_DIR / "lectures").glob("*.md"))
         return f"第{lecture}回の要点はまだありません。用意されている回: {', '.join(available)}"
     return path.read_text(encoding="utf-8")
+
+
+# ===================================================================================================
+# 第３回　演習
+# ===================================================================================================
+def make_quiz(lecture: int) -> str:
+    """指定した回の用語から 1つを選び、
+    確認問題と答えを返す。
+    「第2回の確認問題を出して」のように、
+    復習用の問題を求められたときに使う。
+    """
+    try:
+        # 1. load_glossary() から lecture が一致する用語を集める
+        glossary_list = load_glossary() 
+
+        selected_items = [] # ヒットした用語をここに入れる
+
+        for item in glossary_list:
+            if item.get("lecture") == lecture:
+                selected_items.append(item)
+
+        # 2. 1 つ選ぶ（random.choice ）
+        select_glossary = random.choice(selected_items)
+    
+        # 3. 問題と答えを文字列で返す（ json.dumps など）
+        let = {
+            "lecture": lecture,
+            "question": f"「{select_glossary.get('term', '')}」の意味は？",
+            "answer": select_glossary.get("definition", "")
+        }
+
+        return json.dumps(let, ensure_ascii=False)
+
+    except Exception:
+    # 何らかのエラーがあってもここで後処理するよ
+    # とりあえず、正常終了時と同じ形式でjson形式で返すようにする
+        let = {
+            "lecture": lecture,
+            "question": f"第{lecture}回の問題作成が失敗しました。",
+            "answer": "Error"
+        }
+
+        return json.dumps(let, ensure_ascii=False)
+
+
+# ===================================================================================================
+# 第３回　宿題（ログ保存）
+# ===================================================================================================
+from pydantic_ai import RunContext
+from datetime import datetime
+def save_learning_log(ctx: RunContext,lecture: str, question: str, answer: str) -> str:
+    """回と問題と答えを learning_log フォルダ内の当日の日付ファイルに保存する。
+    保存の前に利用者の確認を挟む。
+    """
+    try:
+        # 1. learning_logフォルダの存在確認、なかったら作る
+        log_dir = Path("learning_log")
+        log_dir.mkdir(parents=True, exist_ok=True)
+    
+        # 2. 実行日の yyyymmdd 形式のログファイルの存在確認、なかったら作る
+        today_str = datetime.now().strftime("%Y%m%d")
+        log_file = log_dir / f"{today_str}.md"
+
+        # ファイルがなければ見出し付きで新規作成
+        if not log_file.exists():
+            log_file.write_text(f"# 学習記録 ({today_str})\n\n", encoding="utf-8")
+        
+        # 3. ログファイルに追記（問題と答え）
+        log_entry = f"- **Lecture**: {lecture}\n  **Question**: {question}\n  **Answer**: {answer}\n\n"
+    
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(log_entry)
+        
+        return f"学習記録を {log_file} に保存しました。"
+    
+    except Exception:
+        # 何らかのエラーがあってもここで後処理するよ
+        # エラーの意思を文字列で返す
+        return "【Error】save_learning_log"
+
+# TEST
+#if __name__ == "__main__":
+#    # 第2回のクイズをテスト実行
+#    result = make_quiz(2)
+#    print("結果:", result)
