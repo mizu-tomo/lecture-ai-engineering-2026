@@ -91,11 +91,12 @@ def make_quiz(lecture: int) -> str:
     """
     try:
         # 1. load_glossary() から lecture が一致する用語を集める
-        glossary_list = load_glossary() 
+        all_glossary = load_glossary()
+        glossary_list = []
 
         selected_items = [] # ヒットした用語をここに入れる
 
-        for item in glossary_list:
+        for item in all_glossary:
             if item.get("lecture") == lecture:
                 selected_items.append(item)
 
@@ -103,10 +104,25 @@ def make_quiz(lecture: int) -> str:
         select_glossary = random.choice(selected_items)
     
         # 3. 問題と答えを文字列で返す（ json.dumps など）
+        related_ids = select_glossary.get("related", [])
+        related_terms = [
+            item["term"]
+            for item in all_glossary
+            if item.get("id") in related_ids
+        ]
+        hint_parts = []
+        if select_glossary.get("category"):
+            hint_parts.append(f"カテゴリーは「{select_glossary['category']}」です")
+        if related_terms:
+            hint_parts.append(
+                "関連用語は " + "、".join(f"「{term}」" for term in related_terms[:3]) + " です"
+            )
+
         let = {
             "lecture": lecture,
             "question": f"「{select_glossary.get('term', '')}」の意味は？",
-            "answer": select_glossary.get("definition", "")
+            "answer": select_glossary.get("definition", ""),
+            "hint": "。".join(hint_parts) + "。" if hint_parts else "用語集で選ばれた用語の意味を説明してみましょう。",
         }
 
         return json.dumps(let, ensure_ascii=False)
@@ -126,8 +142,12 @@ def make_quiz(lecture: int) -> str:
 # ===================================================================================================
 # 第３回　宿題（ログ保存）
 # ===================================================================================================
+
+from datetime import datetime, timedelta, timezone
 from pydantic_ai import RunContext
-from datetime import datetime
+
+JST = timezone(timedelta(hours=9)) # JST（UTC+9）の定義
+
 def save_learning_log(ctx: RunContext,lecture: str, question: str, answer: str) -> str:
     """回と問題と答えを learning_log フォルダ内の当日の日付ファイルに保存する。
     保存の前に利用者の確認を挟む。
@@ -138,7 +158,7 @@ def save_learning_log(ctx: RunContext,lecture: str, question: str, answer: str) 
         log_dir.mkdir(parents=True, exist_ok=True)
     
         # 2. 実行日の yyyymmdd 形式のログファイルの存在確認、なかったら作る
-        today_str = datetime.now().strftime("%Y%m%d")
+        today_str = datetime.now(JST).strftime("%Y%m%d")
         log_file = log_dir / f"{today_str}.md"
 
         # ファイルがなければ見出し付きで新規作成

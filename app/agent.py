@@ -133,7 +133,7 @@ def main() -> None:
         return
     if not args.question:
         #parser.error("質問を指定してください")
-        chat()
+        chat(target=target)
         return
 
     print(f"[model] {MODEL}")
@@ -149,10 +149,19 @@ def main() -> None:
         print_trace(result)
 
 # ログ保存の確認をするための対話モード
-def chat() -> None:
+def is_hint_request(text: str) -> bool:
+    normalized = text.casefold().strip()
+    return (
+        normalized in {"ヒント", "hint", "help"}
+        or normalized.startswith(("ヒントを", "ヒントください", "ヒントをください", "ヒント出して"))
+    )
+
+
+def chat(target: Agent | None = None) -> None:
     print("=== 学習支援エージェントと対話を開始します ('exit' または 'quit' で終了) ===")
     print("確認問題は '/quiz 2' のように指定してください。")
 
+    target = target or agent
     message_history = []  # これまでの会話の履歴（セッション）を保持するリスト
     quiz = None           # 現在のクイズデータを一時保持
 
@@ -185,6 +194,8 @@ def chat() -> None:
                 quiz = quiz_data
                 print(f"\n第{lecture}回 確認問題")
                 print(quiz_data["question"])
+                if quiz_data.get("hint"):
+                    print(f"ヒント: {quiz_data['hint']}")
                 print("回答を入力してください。")
                 continue
 
@@ -194,6 +205,10 @@ def chat() -> None:
 
         # クイズが出題された状態でユーザーが「答え」を入力したときの処理
         if quiz is not None:
+            if is_hint_request(question):
+                print(f"ヒント: {quiz.get('hint', '用語集のカテゴリーや関連用語を手掛かりに考えてみましょう。')}")
+                continue
+
             expected = quiz["answer"]
 
             # 表記揺れ（全角半角やスペース）を防ぐために文字列を正規化して比較
@@ -218,7 +233,7 @@ def chat() -> None:
                 )
                 try:
                     # 会話を引き継いで、エージェントを実行
-                    result = agent.run_sync(
+                    result = target.run_sync(
                         prompt,
                         message_history=message_history,
                         model=build_model(),
@@ -236,7 +251,7 @@ def chat() -> None:
                                 call.tool_call_id: ToolApproved()
                                 for call in save_calls
                             }
-                            result = agent.run_sync(
+                            result = target.run_sync(
                                 message_history=message_history,
                                 deferred_tool_results=result.output.build_results(approvals=approvals),
                                 model=build_model(),
@@ -266,7 +281,7 @@ def chat() -> None:
 
         # 通常のフリー会話・質問の処理
         try:
-            result = agent.run_sync(
+            result = target.run_sync(
                 question,
                 message_history=message_history,
                 model=build_model(),
